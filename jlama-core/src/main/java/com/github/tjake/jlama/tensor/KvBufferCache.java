@@ -25,6 +25,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
+import java.io.File;
 import java.io.IOError;
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -32,6 +33,7 @@ import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.nio.ShortBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Iterator;
 import java.util.Map;
@@ -43,6 +45,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A cache for key-value buffers used in the model.
+ * 
  * @see com.github.tjake.jlama.model.functions.Generator
  */
 public class KvBufferCache implements Closeable {
@@ -70,6 +73,11 @@ public class KvBufferCache implements Closeable {
             it.next().getValue().close();
             it.remove();
         }
+    }
+
+    public void close(UUID sessionId) {
+        KvBuffer buffer = kvBufferCache.get(sessionId);
+        buffer.close();
     }
 
     class KvPageContext {
@@ -115,8 +123,10 @@ public class KvBufferCache implements Closeable {
 
     /**
      * A Page of a key-value buffer.
-     * Rather than allocating one giant buffer for the entire key-value buffer, we allocate slices of the buffer
-     * as needed. This allows us to keep the memory usage low, and also allows us to allocate very large contexts.
+     * Rather than allocating one giant buffer for the entire key-value buffer, we
+     * allocate slices of the buffer
+     * as needed. This allows us to keep the memory usage low, and also allows us to
+     * allocate very large contexts.
      */
     class KvBufferPage implements AutoCloseable {
         private final AbstractTensor tensor;
@@ -126,6 +136,10 @@ public class KvBufferCache implements Closeable {
 
         private final AtomicBoolean closed = new AtomicBoolean(false);
         private final RandomAccessFile raf;
+        private final File rafFile;
+        private final FileChannel rafChannel;
+        private ShortBuffer sb;
+        private FloatBuffer fb;
 
         KvBufferPage(KvPageContext pageCtx, String pageId, boolean ephemeral) {
             this.pageCtx = pageCtx;
@@ -133,33 +147,31 @@ public class KvBufferCache implements Closeable {
 
             if (model.getConfig().workingDirectory().isEmpty() || ephemeral) {
                 this.raf = null;
+                this.rafFile = null;
+                this.rafChannel = null;
                 this.tensor = TensorCache.instance.get(model.getWorkingDType(), pageCtx.pageShape);
             } else {
                 try {
-                    raf = new RandomAccessFile(
-                        Paths.get(
-                            model.getConfig().workingDirectory().get().toString(),
-                            pageCtx.session.toString() + "-" + pageId + ".page"
-                        ).toFile(),
-                        "rw"
-                    );
+                    rafFile = Paths.get(
+                        model.getConfig().workingDirectory().get().toString(),
+                        pageCtx.session.toString() + "-" + pageId + ".page"
+                    ).toFile();
+                    rafFile.deleteOnExit();
+                    raf = new RandomAccessFile(rafFile, "rw");
                     long bytes = pageCtx.pageShape.size() * model.getWorkingDType().size();
                     logger.debug("Allocating page {} with {} bytes {}", pageId, bytes, raf.length());
                     if (raf.length() != bytes) raf.setLength(bytes);
 
                     AbstractTensor t;
+                    fb = null;
+                    sb = null;
+                    rafChannel = raf.getChannel();
                     if (model.getWorkingDType() == DType.F32) {
-                        FloatBuffer fb = raf.getChannel()
-                            .map(FileChannel.MapMode.READ_WRITE, 0, bytes)
-                            .order(ByteOrder.LITTLE_ENDIAN)
-                            .asFloatBuffer();
+                        fb = rafChannel.map(FileChannel.MapMode.READ_WRITE, 0, bytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
 
                         t = new FloatBufferTensor(fb, pageCtx.pageShape, true);
                     } else if (model.getWorkingDType() == DType.BF16) {
-                        ShortBuffer sb = raf.getChannel()
-                            .map(FileChannel.MapMode.READ_WRITE, 0, bytes)
-                            .order(ByteOrder.LITTLE_ENDIAN)
-                            .asShortBuffer();
+                        sb = rafChannel.map(FileChannel.MapMode.READ_WRITE, 0, bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer();
 
                         t = new BFloat16BufferTensor("kvmem", sb, pageCtx.pageShape, true);
                     } else {
@@ -186,10 +198,23 @@ public class KvBufferCache implements Closeable {
         @Override
         public void close() throws IOException {
             if (closed.compareAndSet(false, true)) {
+                if (rafChannel != null) {
+                    rafChannel.close();
+                }
                 if (raf != null) {
                     raf.close();
                 }
+                if (rafFile != null) {
+                    try {
+                        Files.delete(rafFile.toPath());
+                    } catch (Exception e) {
+                        logger.warn("Could not delete the temporary file {}: {}", rafFile.getAbsolutePath(), e.getMessage());
+                    }
+                }
                 tensor.close();
+                // free reference to the buffers
+                fb = null;
+                sb = null;
             }
         }
     }
@@ -351,4 +376,5 @@ public class KvBufferCache implements Closeable {
             return tensors;
         }
     }
+
 }

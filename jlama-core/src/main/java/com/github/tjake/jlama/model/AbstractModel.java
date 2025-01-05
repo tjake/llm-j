@@ -178,6 +178,19 @@ public abstract class AbstractModel implements Generator {
         kvBufferCache.close();
     }
 
+    /**
+     * Free resources occupied by the session
+     * 
+     * <p>
+     * This will also delete temporary files if such have been created for the session.
+     * </p>
+     * 
+     * @param sessionId the session for which the {@link KvBufferCache} is closed
+     */
+    public void close(UUID sessionId) {
+        kvBufferCache.close(sessionId);
+    }
+
     protected abstract EmbedInput loadInputWeights();
 
     protected abstract TransformerBlock[] loadTransformerBlockWeights();
