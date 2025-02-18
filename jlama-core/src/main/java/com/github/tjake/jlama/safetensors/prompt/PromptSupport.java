@@ -189,7 +189,7 @@ public class PromptSupport {
         private PromptType type = PromptType.DEFAULT;
         private boolean addGenerationPrompt = true;
 
-        private List<Message> messages = new ArrayList<>(2);
+        private final List<Message> messages = new ArrayList<>(2);
         private boolean stripPreamble = false;
 
         private Builder(TokenizerModel m) {
